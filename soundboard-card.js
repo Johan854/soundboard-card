@@ -5,7 +5,7 @@
  * interrupteurs impulsionnels, avec progression pendant la durée du morceau, blocage des autres tuiles, recherche,
  * repli de la grille et volume. Style verre, thème clair/sombre automatique, éditeur visuel, textes en français.
  */
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 /* === NUANCE COMMUNE v2 (cartes Johan854) ===
  * Bloc identique dans toutes les cartes. Options : nuance, nuance_perso, intensite.
@@ -47,6 +47,7 @@ const DEFAULTS = {
   show_search: true,
   collapsed_count: 12, // nombre de tuiles visibles avant « Tout afficher » (0 = tout afficher)
   stop_on_press: false, // un second appui sur le morceau en cours renvoie l'impulsion
+  auto_volume: 0, // % de volume appliqué avant chaque morceau (0 = désactivé)
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const bad = (st) => !st || st.state === "unavailable" || st.state === "unknown";
@@ -110,6 +111,21 @@ class SoundboardCard extends HTMLElement {
     return tiles.map((t, i) => t.name || words[i].slice(k).join(" "));
   }
 
+  /* Bornes du volume (number / input_number) */
+  _volInfo() {
+    const c = this._config, vs = c.volume_entity ? this._hass.states[c.volume_entity] : null;
+    if (!vs || bad(vs) || isNaN(Number(vs.state))) return null;
+    const a = vs.attributes, min = isFinite(Number(a.min)) ? Number(a.min) : 0, max = isFinite(Number(a.max)) && Number(a.max) > min ? Number(a.max) : 100, step = Number(a.step) > 0 ? Number(a.step) : 1;
+    return { min, max, step, v: Number(vs.state) };
+  }
+  _setVol(value) {
+    const c = this._config, vi = this._volInfo();
+    if (!vi) return Promise.resolve();
+    const v = Math.max(vi.min, Math.min(vi.max, Math.round((value - vi.min) / vi.step) * vi.step + vi.min));
+    this._vol = v; this._sig = ""; setTimeout(() => { this._vol = null; this._sig = ""; }, 2500);
+    return this._hass.callService(c.volume_entity.split(".")[0], "set_value", { entity_id: c.volume_entity, value: v });
+  }
+
   _render() {
     const c = this._config, h = this._hass;
     if (!c || !h) return;
@@ -127,11 +143,12 @@ class SoundboardCard extends HTMLElement {
         ${isP ? `<i class="eq"><u></u><u></u><u></u><u></u></i><i class="pr"><u style="animation-duration:${dur}s;animation-delay:${-(dur - rem).toFixed(2)}s"></u></i>` : ""}</button>`;
     }).join("");
     let volHtml = "";
-    const vs = c.volume_entity ? h.states[c.volume_entity] : null;
-    if (vs && !bad(vs) && !isNaN(Number(vs.state))) {
-      const a = vs.attributes, min = isFinite(Number(a.min)) ? Number(a.min) : 0, max = isFinite(Number(a.max)) && Number(a.max) > min ? Number(a.max) : 100, step = Number(a.step) > 0 ? Number(a.step) : 1;
-      const v = this._vol !== null ? this._vol : Number(vs.state), pct = Math.round(((v - min) / (max - min)) * 100);
-      volHtml = `<div class="vol"><ha-icon icon="${pct <= 0 ? "mdi:volume-off" : pct < 50 ? "mdi:volume-medium" : "mdi:volume-high"}"></ha-icon><input type="range" min="${min}" max="${max}" step="${step}" value="${v}" style="--p:${pct}%" aria-label="Volume"><b data-vp>${pct} %</b></div>`;
+    const vi = this._volInfo();
+    if (vi) {
+      const { min, max, step } = vi;
+      const v = this._vol !== null ? this._vol : vi.v, pct = Math.round(((v - min) / (max - min)) * 100);
+      const auto = Number(c.auto_volume) > 0 ? `<small class="auto" title="Volume réglé avant chaque morceau">auto ${Math.round(Number(c.auto_volume))} %</small>` : "";
+      volHtml = `<div class="vol"><button class="vb" data-vstep="-1" aria-label="Baisser le volume"><ha-icon icon="${pct <= 0 ? "mdi:volume-off" : "mdi:volume-minus"}"></ha-icon></button><input type="range" min="${min}" max="${max}" step="${step}" value="${v}" style="--p:${pct}%" aria-label="Volume"><button class="vb" data-vstep="1" aria-label="Monter le volume"><ha-icon icon="mdi:volume-plus"></ha-icon></button><b data-vp>${pct} %</b>${auto}</div>`;
     }
     const over = tiles.length - lim;
     this.shadowRoot.innerHTML = `<style>
@@ -143,8 +160,11 @@ class SoundboardCard extends HTMLElement {
       ha-icon { --mdc-icon-size:1.5em; flex:none; }
       .head { display:flex; align-items:center; justify-content:space-between; gap:12px; } .head b { font-size:1.1em; font-weight:650; } .head small { color:var(--sb-muted); font-size:.8em; }
       .row { display:flex; align-items:center; gap:.7em; padding:.55em .85em; border-radius:1em; background:var(--sb-glass); border:1px solid var(--sb-glass-b); -webkit-backdrop-filter:blur(18px) saturate(140%); backdrop-filter:blur(18px) saturate(140%); }
-      .vol { flex:1; display:flex; align-items:center; gap:.6em; min-width:0; } .vol b { min-width:2.8em; text-align:right; font-variant-numeric:tabular-nums; font-size:.85em; }
-      input[type=range] { flex:1; min-width:0; -webkit-appearance:none; appearance:none; height:.45em; border-radius:.3em; background:linear-gradient(90deg,var(--sb-gold) var(--p),var(--sb-fill-b) var(--p)); outline:none; }
+      .vol { flex:1; display:flex; align-items:center; gap:.5em; min-width:0; } .vol b { min-width:2.8em; text-align:right; font-variant-numeric:tabular-nums; font-size:.85em; }
+      .vb { flex:none; display:grid; place-items:center; width:2.2em; height:2.2em; border-radius:50%; background:var(--sb-fill); border:1px solid var(--sb-fill-b); } .vb:active { transform:scale(.92); } .vb ha-icon { --mdc-icon-size:1.2em; color:var(--sb-gold); }
+      .auto { flex:none; font-size:.7em; font-weight:700; color:var(--sb-gold); padding:.15em .5em; border-radius:1em; border:1px solid var(--sb-gold); }
+      @container (max-width: 460px) { .row { flex-wrap:wrap; } .search, .vol { flex:1 1 100%; } }
+      input[type=range] { flex:1; min-width:3em; touch-action:pan-y; -webkit-appearance:none; appearance:none; height:.45em; border-radius:.3em; background:linear-gradient(90deg,var(--sb-gold) var(--p),var(--sb-fill-b) var(--p)); outline:none; }
       input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; width:1.4em; height:1.4em; border-radius:50%; background:var(--sb-text); border:2px solid var(--sb-gold); } input[type=range]::-moz-range-thumb { width:1.2em; height:1.2em; border-radius:50%; background:var(--sb-text); border:2px solid var(--sb-gold); }
       .search { flex:1; display:flex; align-items:center; gap:.5em; } .search input { flex:1; min-width:0; font:inherit; color:inherit; background:none; border:0; outline:none; } .search input::placeholder { color:var(--sb-muted); }
       .grid { display:grid; grid-template-columns:repeat(${Number(c.columns) > 0 ? Number(c.columns) : "auto-fill"}, ${Number(c.columns) > 0 ? "minmax(0,1fr)" : "minmax(6.4em,1fr)"}); gap:.55em; }
@@ -170,7 +190,12 @@ class SoundboardCard extends HTMLElement {
       const t = tiles[Number(el.dataset.i)], pl = this._playingId();
       if (pl === t.entity && !c.stop_on_press) return;
       if (pl && pl !== t.entity && c.lock_while_playing) return;
-      h.callService("homeassistant", "toggle", { entity_id: t.entity });
+      const go = () => h.callService("homeassistant", "toggle", { entity_id: t.entity });
+      const av = Number(c.auto_volume), vi2 = this._volInfo();
+      if (pl !== t.entity && av > 0 && vi2) {
+        const target = vi2.min + ((vi2.max - vi2.min) * Math.min(100, av)) / 100;
+        if (Math.abs(vi2.v - target) >= vi2.step / 2) Promise.resolve(this._setVol(target)).catch(() => {}).then(go); else go();
+      } else go();
       this._until[t.entity] = pl === t.entity ? 0 : Date.now() + dur * 1000; this._prev[t.entity] = "on";
       this._cur = ""; this._sig = ""; this._tick(); this._render();
     }));
@@ -182,6 +207,11 @@ class SoundboardCard extends HTMLElement {
       const e = r.querySelector("[data-empty]"); if (e) e.hidden = !(this._q && n === 0);
       const m = r.querySelector("[data-more-btn]"); if (m) m.hidden = !!this._q;
     });
+    r.querySelectorAll("[data-vstep]").forEach((b) => b.addEventListener("click", () => {
+      const vi = this._volInfo(); if (!vi) return;
+      const cur = this._vol !== null ? this._vol : vi.v, inc = Math.max(vi.step, (vi.max - vi.min) / 10);
+      this._setVol(cur + Number(b.dataset.vstep) * inc); this._render();
+    }));
     const inp = r.querySelector("input[type=range]");
     if (inp) {
       inp.addEventListener("pointerdown", () => { this._dragging = true; });
@@ -193,7 +223,8 @@ class SoundboardCard extends HTMLElement {
 
 /* ---------- Éditeur visuel ---------- */
 const LABELS = { ...GV_LABELS, title: "Titre", tiles: "Morceaux (interrupteurs)", volume_entity: "Volume (number / input_number)", duration: "Durée d'un morceau (secondes)", columns: "Colonnes (0 = automatique)",
-  lock_while_playing: "Bloquer les autres morceaux pendant la lecture", show_search: "Afficher la recherche", collapsed_count: "Morceaux visibles avant « Tout afficher » (0 = tous)", stop_on_press: "Un second appui renvoie l'impulsion", theme: "Thème" };
+  lock_while_playing: "Bloquer les autres morceaux pendant la lecture", show_search: "Afficher la recherche", collapsed_count: "Morceaux visibles avant « Tout afficher » (0 = tous)", stop_on_press: "Un second appui renvoie l'impulsion", theme: "Thème",
+  auto_volume: "Volume automatique avant chaque morceau (%, 0 = désactivé)" };
 class SoundboardCardEditor extends HTMLElement {
   setConfig(config) { this._config = { ...DEFAULTS, ...config }; this._keep = (config.tiles || []).filter((x) => x && typeof x === "object"); if (!this._form) this._build(); else this._form.data = this._data(); }
   set hass(h) { this._hass = h; if (this._form) this._form.hass = h; }
@@ -205,6 +236,7 @@ class SoundboardCardEditor extends HTMLElement {
       { name: "title", selector: { text: {} } },
       { name: "tiles", selector: { entity: { multiple: true, domain: ["switch", "button", "input_boolean"] } } },
       { name: "volume_entity", selector: { entity: { domain: ["number", "input_number"] } } },
+      { name: "auto_volume", selector: { number: { min: 0, max: 100, step: 5, mode: "slider", unit_of_measurement: "%" } } },
       { type: "grid", name: "", schema: [{ name: "duration", selector: { number: { min: 1, max: 600, mode: "box" } } }, { name: "columns", selector: { number: { min: 0, max: 8, mode: "box" } } }, { name: "collapsed_count", selector: { number: { min: 0, max: 100, mode: "box" } } },
         { name: "theme", selector: { select: { mode: "dropdown", options: [{ value: "auto", label: "Automatique" }, { value: "light", label: "Clair" }, { value: "dark", label: "Sombre" }] } } }] },
       { type: "grid", name: "", schema: [{ name: "lock_while_playing", selector: { boolean: {} } }, { name: "show_search", selector: { boolean: {} } }, { name: "stop_on_press", selector: { boolean: {} } }] },
